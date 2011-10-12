@@ -52,16 +52,12 @@ class SpectralFeatureAlignment():
    
     def _createDiagonalMatrix(self, squareAffinityMatrix):
         matrix = np.zeros((np.size(squareAffinityMatrix,0),np.size(squareAffinityMatrix, 1)))
-        tmp = []
         for i,x in enumerate(squareAffinityMatrix):
             rowSum = np.sum(x)
             if rowSum == 0:
                 matrix[i][i] = 0     
-                tmp.append(0)
             else:
                 matrix[i][i] = np.sqrt(1.0 / rowSum)
-                tmp.append(np.sqrt(1.0 / rowSum))
-        np.save("myD", tmp)
         return matrix
 
 
@@ -73,11 +69,11 @@ class SpectralFeatureAlignment():
         a = self._createCooccurrenceMatrix(domainIndependentFeatures, domainDependentFeatures)
         print "creating SquareAffinityMatrix..."
         a = self._createSquareAffinityMatrix(a)
-        np.save("myA", a)
         print "creating DiagonalMatrix..."
         b = self._createDiagonalMatrix(a)
         print "multiplying..." 
         c = b.dot(a).dot(b)
+        print c
         print np.size(c,axis=0),np.size(c,axis=1)
         eigenValues, eigenVectors = np.linalg.eig(c)
         print eigenValues[0]
