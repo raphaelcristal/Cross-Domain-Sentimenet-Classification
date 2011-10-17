@@ -2,6 +2,8 @@
 from sqlite3 import dbapi2 as sqlite
 from os import path
 import numpy as np
+from multiprocessMatrixMultiplication import matrixMultiplication
+from sklearn.svm import LinearSVC
 class SpectralFeatureAlignment():
 
     def __init__(self, dbDir, rawDataFolder, sourceDomain, targetDomain):
@@ -12,6 +14,7 @@ class SpectralFeatureAlignment():
         self._tableName = sourceDomain + "to" + targetDomain
         self._connection = sqlite.connect(path.join(dbDir,sourceDomain))
         self._cursor = self._connection.cursor()
+        self._lsvc = LinearSVC()
 
     def _getFeatures(self, maxDIFeatures=500, minFrequency=5):
         features = []
@@ -60,11 +63,47 @@ class SpectralFeatureAlignment():
                 matrix[i][i] = np.sqrt(1.0 / rowSum)
         return matrix
 
+    def _createDocumentVectors(self,domainDependentFeatures, domainIndependentFeatures, domain):
+        numDomainDep = len(domainDependentFeatures)
+        numDomainIndep = len(domainIndependentFeatures)
+        domainDepSet = set(domainDependentFeatures)
+        domainIndepSet = set(domainIndependentFeatures)
+        documentVectors = []
+        classifications = []
+        def __parseFile(filePath):
+            with open(filePath,"r") as f:
+                for review in f:
+                    classification = 1 if "#label#:positive" in review else 0
+                    domainDepVector = np.zeros(numDomainDep)
+                    domainIndepVector = np.zeros(numDomainIndep)
+                    reviewFeatures = set([tupel.split(":")[0].decode("utf-8") for tupel in review.split()])
+                    domainDepReviewFeatures = domainDepSet & reviewFeatures
+                    domainIndepReviewFeatures = domainIndepSet & reviewFeatures
+                    for feature in domainIndepReviewFeatures:
+                        domainIndepVector[domainIndependentFeatures.index(feature)] = 1
+                    for feature in domainDepReviewFeatures:
+                        domainDepVector[domainDependentFeatures.index(feature)] = 1
+                    documentVectors.append((domainIndepVector,domainDepVector))
+                    classifications.append(classification)
+
+        __parseFile(path.join(self._rawDataFolder, domain, "positive.review"))
+        __parseFile(path.join(self._rawDataFolder, domain, "negative.review"))
+        return documentVectors,classifications 
+
+    def _trainClassifier(self, trainingVectors, classifications):
+        self._lsvc.fit(trainingVectors,classifications)
+
+    def _testClassifier(self,testVectors):
+        return self._lsvc.predict(testVectors)
 
 
-    def go(self):
+
+
+    def go(self,K=75, Y=0.6):
         domainIndependentFeatures, domainDependentFeatures = self._getFeatures(300,18)
-        print "independent " + str(len(domainIndependentFeatures)) + " dependent " + str(len(domainDependentFeatures))
+        numDomainIndep = len(domainIndependentFeatures)
+        numDomainDep = len(domainDependentFeatures)
+        print "number of independent " + str(numDomainIndep) + " number of dependent " + str(numDomainDep)
         print "creating cooccurrenceMatrix..."
         a = self._createCooccurrenceMatrix(domainIndependentFeatures, domainDependentFeatures)
         print "creating SquareAffinityMatrix..."
@@ -72,13 +111,24 @@ class SpectralFeatureAlignment():
         print "creating DiagonalMatrix..."
         b = self._createDiagonalMatrix(a)
         print "multiplying..." 
-        c = b.dot(a).dot(b)
-        print c
-        print np.size(c,axis=0),np.size(c,axis=1)
+        c = matrixMultiplication(matrixMultiplication(b,a),b)
+        print "calculating eigenvalues and eigenvectors"
         eigenValues, eigenVectors = np.linalg.eig(c)
-        print eigenValues[0]
-        print eigenVectors[:,0]
-
+        print "finding k largest eigenvectors"
+        U  = [eigenVectors[:,x].reshape(np.size(eigenVectors,0),1) for x in eigenValues.argsort()[:K]]
+        U = np.concatenate(U,axis=1)[:numDomainDep]
+        print "training classifier..."
+        documentVectors,classifications = self._createDocumentVectors(domainDependentFeatures, domainIndependentFeatures,self._sourceDomain)
+        clustering = [vector[1].dot(U).dot(Y).astype(np.float64) for vector in documentVectors]
+        trainingVectors = [np.concatenate((documentVectors[x][0],documentVectors[x][1],clustering[x])) for x in range(np.size(documentVectors,axis=0))]
+        self._trainClassifier(trainingVectors,classifications)
+        print "testing..."
+        documentVectors,classificatons = self._createDocumentVectors(domainDependentFeatures, domainIndependentFeatures,self._targetDomain)
+        clustering = [vector[1].dot(U).dot(Y).astype(np.float64) for vector in documentVectors]
+        testVectors = [np.concatenate((documentVectors[x][0],documentVectors[x][1],clustering[x])) for x in range(np.size(documentVectors,axis=0))]
+        results = self._testClassifier(testVectors)
+        print np.sum(results[:1000])
+        print np.sum(results[1000:])
 
 
 

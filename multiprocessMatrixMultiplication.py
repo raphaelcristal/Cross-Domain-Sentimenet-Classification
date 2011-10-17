@@ -14,6 +14,7 @@ def matrixMultiplication(A,B):
                 (A[blockSize:,:],B[:,:blockSize]),
                 (A[blockSize:,:],B[:,blockSize:]))
     results = pool.map(_calculateBlock,taskList)
+    pool.close()
     return np.concatenate((
             np.concatenate((results[0], results[1]), axis=1),
             np.concatenate((results[2], results[3]), axis=1))
