@@ -1,8 +1,9 @@
 # -*- coding:utf-8 -*-
 from sqlite3 import dbapi2 as sqlite
 from os import path
+from sys import argv
 import numpy as np
-from multiprocessMatrixMultiplication import matrixMultiplication
+from scipy.sparse.linalg import eigs
 from sklearn.svm import LinearSVC
 class SpectralFeatureAlignment():
 
@@ -14,11 +15,11 @@ class SpectralFeatureAlignment():
         self._tableName = sourceDomain + "to" + targetDomain
         self._connection = sqlite.connect(path.join(dbDir,sourceDomain))
         self._cursor = self._connection.cursor()
-        self._lsvc = LinearSVC()
+        self._lsvc = LinearSVC(C=10000)
 
     def _getFeatures(self, maxDIFeatures=500, minFrequency=5):
         features = []
-        self._cursor.execute("SELECT term FROM bookstodvd WHERE freqSource + freqTarget >= ?", [minFrequency])
+        self._cursor.execute("SELECT term FROM " +self._tableName+ " WHERE freqSource + freqTarget >= ?", [minFrequency])
         features = [a[0] for a in self._cursor.fetchall()]
         return features[:maxDIFeatures], features[maxDIFeatures:]
 
@@ -76,13 +77,15 @@ class SpectralFeatureAlignment():
                     classification = 1 if "#label#:positive" in review else 0
                     domainDepVector = np.zeros(numDomainDep)
                     domainIndepVector = np.zeros(numDomainIndep)
-                    reviewFeatures = set([tupel.split(":")[0].decode("utf-8") for tupel in review.split()])
+                    reviewList = [tupel.split(":") for tupel in review.split() if "#label#" not in tupel]
+                    reviewDict = {x[0].decode("utf-8"):int(x[1]) for x in reviewList}
+                    reviewFeatures = set(reviewDict.keys())
                     domainDepReviewFeatures = domainDepSet & reviewFeatures
                     domainIndepReviewFeatures = domainIndepSet & reviewFeatures
                     for feature in domainIndepReviewFeatures:
-                        domainIndepVector[domainIndependentFeatures.index(feature)] = 1
+                        domainIndepVector[domainIndependentFeatures.index(feature)] = reviewDict[feature]
                     for feature in domainDepReviewFeatures:
-                        domainDepVector[domainDependentFeatures.index(feature)] = 1
+                        domainDepVector[domainDependentFeatures.index(feature)] = reviewDict[feature]
                     documentVectors.append((domainIndepVector,domainDepVector))
                     classifications.append(classification)
 
@@ -93,14 +96,16 @@ class SpectralFeatureAlignment():
     def _trainClassifier(self, trainingVectors, classifications):
         self._lsvc.fit(trainingVectors,classifications)
 
-    def _testClassifier(self,testVectors):
-        return self._lsvc.predict(testVectors)
+    def _testClassifier(self,testVectors,classifications):
+        return self._lsvc.score(testVectors,classifications)
 
 
 
 
-    def go(self,K=75, Y=0.6):
-        domainIndependentFeatures, domainDependentFeatures = self._getFeatures(300,18)
+    def go(self,K=100, Y=0.6, DI=500, FREQ=18):
+        print self._sourceDomain
+        print self._targetDomain
+        domainIndependentFeatures, domainDependentFeatures = self._getFeatures(DI,FREQ)
         numDomainIndep = len(domainIndependentFeatures)
         numDomainDep = len(domainDependentFeatures)
         print "number of independent " + str(numDomainIndep) + " number of dependent " + str(numDomainDep)
@@ -111,40 +116,29 @@ class SpectralFeatureAlignment():
         print "creating DiagonalMatrix..."
         b = self._createDiagonalMatrix(a)
         print "multiplying..." 
-        c = matrixMultiplication(matrixMultiplication(b,a),b)
+        c = b.dot(a)
+        del a
+        c = c.dot(b)
+        del b
         print "calculating eigenvalues and eigenvectors"
-        eigenValues, eigenVectors = np.linalg.eig(c)
-        print "finding k largest eigenvectors"
-        U  = [eigenVectors[:,x].reshape(np.size(eigenVectors,0),1) for x in eigenValues.argsort()[:K]]
+        eigenValues,eigenVectors = eigs(c, k=K, which="LR")
+        del c
+        print "building document vectors..."
+        documentVectorsTraining,classifications = self._createDocumentVectors(domainDependentFeatures, domainIndependentFeatures,self._sourceDomain)
+        documentVectorsTesting,classificatons = self._createDocumentVectors(domainDependentFeatures, domainIndependentFeatures,self._targetDomain)
+        print "training and testing..."
+        self._lsvc = LinearSVC(C=10000)
+        U  = [eigenVectors[:,x].reshape(np.size(eigenVectors,0),1) for x in eigenValues.argsort()]
         U = np.concatenate(U,axis=1)[:numDomainDep]
-        print "training classifier..."
-        documentVectors,classifications = self._createDocumentVectors(domainDependentFeatures, domainIndependentFeatures,self._sourceDomain)
-        clustering = [vector[1].dot(U).dot(Y).astype(np.float64) for vector in documentVectors]
-        trainingVectors = [np.concatenate((documentVectors[x][0],documentVectors[x][1],clustering[x])) for x in range(np.size(documentVectors,axis=0))]
+        clustering = [vector[1].dot(U).dot(Y).astype(np.float64) for vector in documentVectorsTraining]
+        trainingVectors = [np.concatenate((documentVectorsTraining[x][0],documentVectorsTraining[x][1],clustering[x])) for x in range(np.size(documentVectorsTraining,axis=0))]
         self._trainClassifier(trainingVectors,classifications)
-        print "testing..."
-        documentVectors,classificatons = self._createDocumentVectors(domainDependentFeatures, domainIndependentFeatures,self._targetDomain)
-        clustering = [vector[1].dot(U).dot(Y).astype(np.float64) for vector in documentVectors]
-        testVectors = [np.concatenate((documentVectors[x][0],documentVectors[x][1],clustering[x])) for x in range(np.size(documentVectors,axis=0))]
-        results = self._testClassifier(testVectors)
-        print np.sum(results[:1000])
-        print np.sum(results[1000:])
+        clustering = [vector[1].dot(U).dot(Y).astype(np.float64) for vector in documentVectorsTesting]
+        testVectors = [np.concatenate((documentVectorsTesting[x][0],documentVectorsTesting[x][1],clustering[x])) for x in range(np.size(documentVectorsTesting,axis=0))]
+        print "accuracy: %f with K=%i AND DI=%i AND Y=%f" % (self._testClassifier(testVectors,classifications),K,DI,Y)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-sfa = SpectralFeatureAlignment("/home/raphael/BachelorThesis/Data","/home/raphael/BachelorThesis/Data/processed_acl", "books", "dvd")
-sfa.go()
-
-
-
+if __name__ == "__main__":
+    source = argv[1]
+    target = argv[2]
+    sfa = SpectralFeatureAlignment("/home/raphael/BachelorThesis/DataBig","/home/raphael/BachelorThesis/Data/processed_acl", source, target)
+    sfa.go();
