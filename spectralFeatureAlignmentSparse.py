@@ -23,7 +23,7 @@ class SpectralFeatureAlignment():
         features = []
         self._cursor.execute("SELECT term FROM " +self._tableName+ " WHERE freqSource + freqTarget >= ?", [minFrequency])
         features = [a[0] for a in self._cursor.fetchall()]
-        return features[:maxDIFeatures], features[maxDIFeatures:]
+        return sorted(features[:maxDIFeatures]), sorted(features[maxDIFeatures:])
 
     def _createCooccurrenceMatrix(self, domainIndependentFeatures, domainDependentFeatures):
         domainIndependentFeaturesSet = set(domainIndependentFeatures)
@@ -35,11 +35,9 @@ class SpectralFeatureAlignment():
                         independentFeatures = reviewFeatures & domainIndependentFeaturesSet
                         dependentFeatures = reviewFeatures & domainDependentFeaturesSet
                         for dependentFeature in dependentFeatures:
-                            #rowIndex = domainDependentFeatures.index(dependentFeature)
                             rowIndex = bisect_left(domainDependentFeatures,dependentFeature)
                             for independentFeature in independentFeatures:
                                 matrix[rowIndex, bisect_left(domainIndependentFeatures,independentFeature)] += 1
-                                #matrix[rowIndex, domainIndependentFeatures.index(independentFeature)] += 1
                         
         matrix = np.zeros((len(domainDependentFeatures), len(domainIndependentFeatures)))
         __parseFile(path.join(self._rawDataFolder, self._sourceDomain, "positive.review"))
@@ -83,11 +81,11 @@ class SpectralFeatureAlignment():
                     domainIndepValues, domainIndepIndizes = [],[]
                     for feature in domainIndepReviewFeatures:
                         domainIndepValues.append(reviewDict[feature])
-                        #domainIndepIndizes.append(domainIndependentFeatures.index(feature))
+                        #domainIndepValues.append(1)
                         domainIndepIndizes.append(bisect_left(domainIndependentFeatures,feature))
                     for feature in domainDepReviewFeatures:
                         domainDepValues.append(reviewDict[feature])
-                        #domainDepIndizes.append(domainDependentFeatures.index(feature))
+                        #domainDepValues.append(1)
                         domainDepIndizes.append(bisect_left(domainDependentFeatures,feature))
                     domainIndepVector = sparse.csr_matrix((domainIndepValues,(np.zeros(len(domainIndepIndizes)),domainIndepIndizes)),shape=(1,numDomainIndep))
                     domainDepVector = sparse.csr_matrix((domainDepValues,(np.zeros(len(domainDepIndizes)),domainDepIndizes)),shape=(1,numDomainDep))
@@ -107,14 +105,12 @@ class SpectralFeatureAlignment():
 
 
 
-    def go(self,K=100, Y=0.6, DI=500, FREQ=1):
+    def go(self,K=100, Y=0.6, DI=500, minFreq=2):
         print self._sourceDomain + " -> " + self._targetDomain
-        domainIndependentFeatures, domainDependentFeatures = self._getFeatures(DI,FREQ)
-        domainIndependentFeatures.sort()
-        domainDependentFeatures.sort()
+        domainIndependentFeatures, domainDependentFeatures = self._getFeatures(DI,minFreq)
         numDomainIndep = len(domainIndependentFeatures)
         numDomainDep = len(domainDependentFeatures)
-        print "number of independent " + str(numDomainIndep) + " number of dependent " + str(numDomainDep)
+        print "number of independent features %i, number of dependent features %i" % (numDomainIndep, numDomainDep)
         print "creating cooccurrenceMatrix..."
         a = self._createCooccurrenceMatrix(domainIndependentFeatures, domainDependentFeatures)
         print "creating SquareAffinityMatrix..."
@@ -141,7 +137,7 @@ class SpectralFeatureAlignment():
         self._trainClassifier(trainingVectors,classifications)
         clustering = [vector[1].dot(U).dot(Y).astype(np.float64) for vector in documentVectorsTesting]
         testVectors = [sparse.hstack((documentVectorsTesting[x][0],documentVectorsTesting[x][1],clustering[x])) for x in range(np.size(documentVectorsTesting,axis=0))]
-        print "accuracy: %f with K=%i AND DI=%i AND Y=%f" % (self._testClassifier(testVectors,classifications),K,DI,Y)
+        print "accuracy: %f with K=%i AND DI=%i AND Y=%f AND minFreq=%i" % (self._testClassifier(testVectors,classifications),K,DI,Y,minFreq)
 
 if __name__ == "__main__":
     source = argv[1]
