@@ -3,7 +3,7 @@ from sqlite3 import dbapi2 as sqlite
 from os import path
 from sys import argv
 import numpy as np
-from scipy.sparse.linalg import eigs
+from scipy.sparse.linalg import eigsh
 from scipy import sparse
 from sklearn.svm.sparse import LinearSVC
 from bisect import bisect_left
@@ -123,15 +123,15 @@ class SpectralFeatureAlignment():
         c = c.dot(b)
         del b
         print "calculating eigenvalues and eigenvectors"
-        eigenValues,eigenVectors = eigs(c, k=K, which="LR")
+        eigenValues,eigenVectors = eigsh(c, k=K, which="LA")
         del c
         print "building document vectors..."
         documentVectorsTraining,classifications = self._createDocumentVectors(domainDependentFeatures, domainIndependentFeatures,self._sourceDomain)
         documentVectorsTesting,classificatons = self._createDocumentVectors(domainDependentFeatures, domainIndependentFeatures,self._targetDomain)
         print "training and testing..."
-        self._lsvc = LinearSVC(C=10000)
         U  = [eigenVectors[:,x].reshape(np.size(eigenVectors,0),1) for x in eigenValues.argsort()]
         U = np.concatenate(U,axis=1)[:numDomainDep]
+        U = sparse.csr_matrix(U)
         clustering = [vector[1].dot(U).dot(Y).astype(np.float64) for vector in documentVectorsTraining]
         trainingVectors = [sparse.hstack((documentVectorsTraining[x][0],documentVectorsTraining[x][1],clustering[x])) for x in range(np.size(documentVectorsTraining,axis=0))]
         self._trainClassifier(trainingVectors,classifications)
