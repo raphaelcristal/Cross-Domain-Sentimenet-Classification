@@ -7,6 +7,12 @@ from scipy.sparse.linalg import eigsh
 from scipy import sparse
 from sklearn.svm.sparse import LinearSVC
 from bisect import bisect_left
+
+from nltk.corpus import wordnet as wn
+from nltk.corpus import brown
+from nltk.corpus import stopwords
+from nltk import BigramTagger
+from nltk import UnigramTagger
 class SpectralFeatureAlignment():
 
     def __init__(self, dbDir, rawDataFolder, sourceDomain, targetDomain):
@@ -18,6 +24,9 @@ class SpectralFeatureAlignment():
         self._connection = sqlite.connect(path.join(dbDir,sourceDomain))
         self._cursor = self._connection.cursor()
         self._lsvc = LinearSVC(C=10000)
+        self._featuresWithSynsets = {}
+        self._featuresWithoutSynsets = {}
+        self._allSynsets = []
 
     def _getFeatures(self, maxDIFeatures=500, minFrequency=5):
         features = []
@@ -28,9 +37,50 @@ class SpectralFeatureAlignment():
         features = [feature for feature in features if feature not in mostInformatives]
         return sorted(features[:maxDIFeatures]), sorted(features[maxDIFeatures:])
 
+    def _getSynsets(self, domainIndependentFeatures, minSyn):
+	#unigramTagger = UnigramTagger(brown.tagged_sents(simplify_tags=True))
+        #bigramTagger = BigramTagger(brown.tagged_sents(simplify_tags=True), backoff=unigramTagger)
+	#taggedBigrams = [bigramTagger.tag(feature.split('_')) for feature in domainIndependentFeatures if "_" in feature and "<" not in feature]
+        #tmp = ("PRO", "CNJ", "DET", "EX", "MOD", "P", "TO")
+        #for x in taggedBigrams:
+            #firstWord,firstTag = x[0]
+            #secondWord,secondTag = x[1]
+            #feature = "_".join((firstWord,secondWord))
+            #if firstTag in tmp and secondTag not in tmp:
+                #self._featuresWithSynsets[feature] = wn.synsets(secondWord)
+            #elif firstTag not in tmp and secondTag in tmp:
+                #self._featuresWithSynsets[feature] = wn.synsets(firstWord)
+
+
+        Bigrams = [feature for feature in domainIndependentFeatures if "_" in feature and "<" not in feature]
+        #filterWords = ("a", "and", "are", "be", "has", "have", "i", "is", "it", "of", "the", "to", "will", "had", "as", "my", "that", "was")
+        stopwordList = set(stopwords.words("english")) - set(("no", "nor", "not"))
+        for bigram in Bigrams:
+            firstWord, secondWord = bigram.split("_")
+            if firstWord in stopwordList and secondWord in stopwordList:
+                pass
+            elif firstWord in stopwordList:
+                self._featuresWithSynsets[bigram] = wn.synsets(secondWord)
+            elif secondWord in stopwordList:
+                self._featuresWithSynsets[bigram] = wn.synsets(firstWord)
+
+        self._featuresWithSynsets = {feature:[str(synset) for synset in synsets] for feature,synsets in self._featuresWithSynsets.items() if synsets}
+        unigrams = [feature for feature in domainIndependentFeatures if "_" not in feature]
+        for unigram in unigrams:
+            synsets = wn.synsets(unigram)
+            if synsets:
+                self._featuresWithSynsets[unigram] = [str(synset) for synset in synsets]
+
+        allSynsets = [synsets for sublist in self._featuresWithSynsets.values() for synsets in sublist]
+        allSynsets = set([synset for synset in allSynsets if allSynsets.count(synset) >= minSyn])
+        self._featuresWithSynsets = {feature:set(synsets) & allSynsets for feature,synsets in self._featuresWithSynsets.items() if set(synsets) & allSynsets}
+        self._featuresWithoutSynsets = sorted(set(domainIndependentFeatures) - set(self._featuresWithSynsets.keys()))
+        return sorted(allSynsets)
+
     def _createCooccurrenceMatrix(self, domainIndependentFeatures, domainDependentFeatures):
         domainIndependentFeaturesSet = set(domainIndependentFeatures)
         domainDependentFeaturesSet = set(domainDependentFeatures)
+        numSyn = len(self._allSynsets)
         def __parseFile(filePath):
             with open(filePath, "r") as f:
                 for review in f:
@@ -40,9 +90,13 @@ class SpectralFeatureAlignment():
                         for dependentFeature in dependentFeatures:
                             rowIndex = bisect_left(domainDependentFeatures,dependentFeature)
                             for independentFeature in independentFeatures:
-                                matrix[rowIndex, bisect_left(domainIndependentFeatures,independentFeature)] += 1
+                                if independentFeature in self._featuresWithSynsets:
+                                    for synset in self._featuresWithSynsets[independentFeature]:
+                                        matrix[rowIndex, bisect_left(self._allSynsets,synset)] += 1
+                                else:
+                                    matrix[rowIndex, bisect_left(self._featuresWithoutSynsets,independentFeature)+numSyn] += 1
                         
-        matrix = np.zeros((len(domainDependentFeatures), len(domainIndependentFeatures)))
+        matrix = np.zeros((len(domainDependentFeatures), len(self._featuresWithoutSynsets)+numSyn))
         __parseFile(path.join(self._rawDataFolder, self._sourceDomain, "positive.review"))
         __parseFile(path.join(self._rawDataFolder, self._sourceDomain, "negative.review"))
         __parseFile(path.join(self._rawDataFolder, self._targetDomain, "positive.review"))
@@ -71,6 +125,7 @@ class SpectralFeatureAlignment():
         domainIndepSet = set(domainIndependentFeatures)
         documentVectors = []
         classifications = []
+        numSynsets = len(self._allSynsets)
         def __parseFile(filePath):
             with open(filePath,"r") as f:
                 for review in f:
@@ -83,14 +138,20 @@ class SpectralFeatureAlignment():
                     domainDepValues,domainDepIndizes = [],[]
                     domainIndepValues, domainIndepIndizes = [],[]
                     for feature in domainIndepReviewFeatures:
-                        #domainIndepValues.append(reviewDict[feature])
-                        domainIndepValues.append(1)
-                        domainIndepIndizes.append(bisect_left(domainIndependentFeatures,feature))
+                        if feature in self._featuresWithSynsets:
+                            for synset in self._featuresWithSynsets[feature]:
+                                domainIndepIndizes.append(bisect_left(self._allSynsets,synset))
+                                domainIndepValues.append(1)
+                        else:
+                            domainIndepIndizes.append(bisect_left(self._featuresWithoutSynsets,feature)+numSynsets)
+                            domainIndepValues.append(1)
+                            #domainIndepValues.append(reviewDict[feature])
                     for feature in domainDepReviewFeatures:
                         #domainDepValues.append(reviewDict[feature])
                         domainDepValues.append(1)
                         domainDepIndizes.append(bisect_left(domainDependentFeatures,feature))
-                    domainIndepVector = sparse.csr_matrix((domainIndepValues,(np.zeros(len(domainIndepIndizes)),domainIndepIndizes)),shape=(1,numDomainIndep))
+                    domainIndepVector = sparse.csr_matrix((domainIndepValues,(np.zeros(len(domainIndepIndizes)),domainIndepIndizes)),
+                            shape=(1,len(self._featuresWithoutSynsets)+numSynsets))
                     domainDepVector = sparse.csr_matrix((domainDepValues,(np.zeros(len(domainDepIndizes)),domainDepIndizes)),shape=(1,numDomainDep))
                     documentVectors.append((domainIndepVector,domainDepVector))
                     classifications.append(classification)
@@ -108,12 +169,19 @@ class SpectralFeatureAlignment():
 
 
 
-    def go(self,K=100, Y=6, DI=500, minFreq=5):
+    def go(self,K=100, Y=6, DI=500, minFreq=5, minSyn=10):
         print self._sourceDomain + " -> " + self._targetDomain
         domainIndependentFeatures, domainDependentFeatures = self._getFeatures(DI,minFreq)
         numDomainIndep = len(domainIndependentFeatures)
         numDomainDep = len(domainDependentFeatures)
         #print "number of independent features %i, number of dependent features %i" % (numDomainIndep, numDomainDep)
+        #print "finding synsets..."
+        self._allSynsets = self._getSynsets(domainIndependentFeatures, minSyn)
+        print self._featuresWithSynsets
+        for k,v in self._featuresWithSynsets.items():
+            print str(k) + " : " + str(v)
+        if not self._allSynsets:
+            return
         #print "creating cooccurrenceMatrix..."
         a = self._createCooccurrenceMatrix(domainIndependentFeatures, domainDependentFeatures)
         #print "creating SquareAffinityMatrix..."
@@ -129,21 +197,22 @@ class SpectralFeatureAlignment():
         eigenValues,eigenVectors = eigsh(c, k=K, which="LA")
         del c
         #print "building document vectors..."
-        documentVectorsTraining,classificationsTraining = self._createDocumentVectors(domainDependentFeatures, domainIndependentFeatures,self._sourceDomain)
-        documentVectorsTesting,classificationsTesting = self._createDocumentVectors(domainDependentFeatures, domainIndependentFeatures,self._targetDomain)
+        documentVectorsTraining,classifications = self._createDocumentVectors(domainDependentFeatures, domainIndependentFeatures,self._sourceDomain)
+        documentVectorsTesting,classificatons = self._createDocumentVectors(domainDependentFeatures, domainIndependentFeatures,self._targetDomain)
         #print "training and testing..."
         U  = [eigenVectors[:,x].reshape(np.size(eigenVectors,0),1) for x in eigenValues.argsort()[::-1]]
         U = np.concatenate(U,axis=1)[:numDomainDep]
         U = sparse.csr_matrix(U)
         clustering = [vector[1].dot(U).dot(Y).astype(np.float64) for vector in documentVectorsTraining]
         trainingVectors = [sparse.hstack((documentVectorsTraining[x][0],documentVectorsTraining[x][1],clustering[x])) for x in range(np.size(documentVectorsTraining,axis=0))]
+        self._trainClassifier(trainingVectors,classifications)
         clustering = [vector[1].dot(U).dot(Y).astype(np.float64) for vector in documentVectorsTesting]
         testVectors = [sparse.hstack((documentVectorsTesting[x][0],documentVectorsTesting[x][1],clustering[x])) for x in range(np.size(documentVectorsTesting,axis=0))]
-        self._trainClassifier(trainingVectors, classificationsTraining)
-        print "accuracy: %.2f with K=%i AND DI=%i AND Y=%.1f AND minFreq=%i" % (self._testClassifier(testVectors,classificationsTesting)*100,K,DI,Y,minFreq)
+        print "accuracy: %.2f with K=%i AND DI=%i AND Y=%.1f AND minFreq=%i AND minSyn=%i" % (self._testClassifier(testVectors,classifications)*100,K,DI,Y,minFreq,minSyn)
 
 if __name__ == "__main__":
     source = argv[1]
     target = argv[2]
+    syn = int(argv[3])
     sfa = SpectralFeatureAlignment("/home/raphael/BachelorThesis/DataBig","/home/raphael/BachelorThesis/Data/processed_acl", source, target)
-    sfa.go()
+    sfa.go(minSyn=syn);
